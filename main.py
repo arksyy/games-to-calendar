@@ -20,12 +20,16 @@ class DDLCGameFetcher:
         'septembre': 9, 'octobre': 10, 'novembre': 11, 'décembre': 12
     }
 
+    @staticmethod
+    def _normalize_team(name):
+        return name.replace('’', "'").replace('‘', "'").strip()
+
     def __init__(self, url="https://www.ddlc.ca/ligues/calendrier/"):
         load_dotenv()
         team_names_str = os.getenv('TEAM_NAMES')
         if not team_names_str:
             raise ValueError("TEAM_NAMES not found in .env file. Please configure your team names.")
-        self.team_names = [name.strip() for name in team_names_str.split(',')]
+        self.team_names = [self._normalize_team(name) for name in team_names_str.split(',')]
         season = os.getenv('SEASON')
         if not season:
             raise ValueError("SEASON not found in .env file. Please configure the season label (e.g. 'Adulte | ÉTÉ 2026').")
@@ -166,7 +170,7 @@ class DDLCGameFetcher:
                 is_home = False
 
                 for i, team in enumerate(team_names):
-                    if team in self.team_names:
+                    if self._normalize_team(team) in self.team_names:
                         our_team = team
                         opponent = team_names[1 - i]
                         is_home = i == 1
