@@ -26,6 +26,10 @@ class DDLCGameFetcher:
         if not team_names_str:
             raise ValueError("TEAM_NAMES not found in .env file. Please configure your team names.")
         self.team_names = [name.strip() for name in team_names_str.split(',')]
+        season = os.getenv('SEASON')
+        if not season:
+            raise ValueError("SEASON not found in .env file. Please configure the season label (e.g. 'Adulte | ÉTÉ 2026').")
+        self.season = season.strip()
         self.url = url
         self.games = []
 
@@ -83,6 +87,25 @@ class DDLCGameFetcher:
             iframe_page = await browser.new_page()
             await iframe_page.goto(iframe_url, wait_until="networkidle")
             await asyncio.sleep(2)
+
+            try:
+                print(f"Selecting season '{self.season}'...")
+                season_dropdown = iframe_page.locator(
+                    'button, .dropdown-toggle, [class*="dropdown"]'
+                ).filter(has_text=re.compile(r'(ÉTÉ|Automne/Hiver|Toutes les saisons)'))
+                if await season_dropdown.count() > 0:
+                    await season_dropdown.first.click()
+                    await asyncio.sleep(1)
+                    option = iframe_page.locator(
+                        'li, a, [role="option"], .dropdown-item'
+                    ).get_by_text(self.season, exact=True).first
+                    await option.click()
+                    await asyncio.sleep(3)
+                else:
+                    print("Warning: Could not find season dropdown, using default season")
+            except Exception as e:
+                print(f"Warning: Error selecting season '{self.season}': {e}")
+                print("Continuing with default season...")
 
             try:
                 list_view_button = await iframe_page.query_selector('label.list_view[data-view="list"]')
