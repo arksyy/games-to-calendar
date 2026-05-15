@@ -286,6 +286,21 @@ class DDLCGameFetcher:
 
         return self.games
 
+    @staticmethod
+    def _applescript_date(dt, var_name):
+        """Build an AppleScript snippet that sets `var_name` to a date,
+        locale-independently (avoids `date "..."` string parsing)."""
+        return (
+            f'set {var_name} to (current date)\n'
+            f'set day of {var_name} to 1\n'
+            f'set year of {var_name} to {dt.year}\n'
+            f'set month of {var_name} to {dt.month}\n'
+            f'set day of {var_name} to {dt.day}\n'
+            f'set hours of {var_name} to {dt.hour}\n'
+            f'set minutes of {var_name} to {dt.minute}\n'
+            f'set seconds of {var_name} to 0'
+        )
+
     def add_to_calendar(self):
         """Add games to Apple Calendar using AppleScript."""
         if not self.games:
@@ -295,16 +310,16 @@ class DDLCGameFetcher:
         skipped_count = 0
 
         for game in self.games:
-            start_str = game['start'].strftime('%m/%d/%Y %I:%M:%S %p')
-            end_str = game['end'].strftime('%m/%d/%Y %I:%M:%S %p')
+            start_decl = self._applescript_date(game['start'], 'startDate')
+            end_decl = self._applescript_date(game['end'], 'endDate')
             calendar_name = game['calendar']
 
             check_script = f'''
+            {start_decl}
             tell application "Calendar"
                 tell calendar "{calendar_name}"
                     set eventExists to false
-                    set checkDate to date "{start_str}"
-                    repeat with evt in (every event whose start date is checkDate)
+                    repeat with evt in (every event whose start date is startDate)
                         if summary of evt is "{game['title']}" then
                             set eventExists to true
                             exit repeat
@@ -330,9 +345,11 @@ class DDLCGameFetcher:
                 pass
 
             add_script = f'''
+            {start_decl}
+            {end_decl}
             tell application "Calendar"
                 tell calendar "{calendar_name}"
-                    make new event with properties {{summary:"{game['title']}", start date:date "{start_str}", end date:date "{end_str}", location:"{game['location']}", description:"{game['notes']}"}}
+                    make new event with properties {{summary:"{game['title']}", start date:startDate, end date:endDate, location:"{game['location']}", description:"{game['notes']}"}}
                 end tell
             end tell
             '''
