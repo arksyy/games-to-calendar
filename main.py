@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
@@ -23,7 +24,7 @@ class DDLCGameFetcher:
 
     @staticmethod
     def _normalize_team(name):
-        return name.replace('’', "'").replace('‘', "'").strip()
+        return name.replace('’', "'").replace('‘', "'").strip().casefold()
 
     def __init__(self, mode="default", url="https://www.ddlc.ca/ligues/calendrier/"):
         load_dotenv()
@@ -33,17 +34,20 @@ class DDLCGameFetcher:
             team_names_str = os.getenv('GAB_TEAM_NAMES')
             if not team_names_str:
                 raise ValueError("GAB_TEAM_NAMES not found in .env file. Please configure your gab team names.")
+            self.category = os.getenv('GAB_CATEGORY', 'F6+ (Saint-Aug)').strip()
             self.gab_calendar_staug = os.getenv('GAB_CALENDAR_STAUG', 'Dek St-Aug GAB')
             self.gab_calendar_chauveau = os.getenv('GAB_CALENDAR_CHAUVEAU', 'Dek Chauveau GAB')
         else:
             team_names_str = os.getenv('TEAM_NAMES')
             if not team_names_str:
                 raise ValueError("TEAM_NAMES not found in .env file. Please configure your team names.")
+            self.category = os.getenv('CATEGORY', 'B2 (Interligue)').strip()
 
+        self.filter_team = team_names_str.split(',')[0].strip()
         self.team_names = [self._normalize_team(name) for name in team_names_str.split(',')]
         season = os.getenv('SEASON')
         if not season:
-            raise ValueError("SEASON not found in .env file. Please configure the season label (e.g. 'Adulte | ÉTÉ 2026').")
+            raise ValueError("SEASON not found in .env file. Please configure the season label (e.g. 'Adulte | Automne/Hiver 2026-2027').")
         self.season = season.strip()
         self.url = url
         self.games = []
@@ -106,10 +110,30 @@ class DDLCGameFetcher:
             return "Autre", f"game {category} Levis"
         return None
 
+    async def _select_filter(self, page, button_selector, option_selector, label):
+        """Select a visible DDLC filter option and verify the selected label."""
+        button = page.locator(button_selector)
+        await button.click()
+        for option in await page.locator(f'{option_selector}:visible').all():
+            if self._normalize_team(await option.inner_text()) == self._normalize_team(label):
+                await option.click()
+                await page.wait_for_function(
+                    "([selector, expected]) => document.querySelector(selector)?.textContent.trim().replace(/[’‘]/g, \"'\").toLowerCase() === expected",
+                    arg=[button_selector, self._normalize_team(label)],
+                )
+                await page.locator('.loading_overlay').wait_for(state='hidden')
+                return
+        raise RuntimeError(f"Calendar filter option not found: {label}")
+
     async def fetch_games(self):
         """Fetch games from the DDLC website using Playwright."""
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser_path = os.getenv('CHROME_EXECUTABLE')
+            if not browser_path and sys.platform == 'darwin':
+                chrome_path = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+                if chrome_path.exists():
+                    browser_path = str(chrome_path)
+            browser = await p.chromium.launch(headless=True, executable_path=browser_path)
             page = await browser.new_page()
 
             print(f"Loading {self.url}...")
@@ -129,36 +153,15 @@ class DDLCGameFetcher:
             await iframe_page.goto(iframe_url, wait_until="networkidle")
             await asyncio.sleep(2)
 
-            try:
-                print(f"Selecting season '{self.season}'...")
-                season_dropdown = iframe_page.locator(
-                    'button, .dropdown-toggle, [class*="dropdown"]'
-                ).filter(has_text=re.compile(r'(ÉTÉ|Automne/Hiver|Toutes les saisons)'))
-                if await season_dropdown.count() > 0:
-                    await season_dropdown.first.click()
-                    await asyncio.sleep(1)
-                    option = iframe_page.locator(
-                        'li, a, [role="option"], .dropdown-item'
-                    ).get_by_text(self.season, exact=True).first
-                    await option.click()
-                    await asyncio.sleep(3)
-                else:
-                    print("Warning: Could not find season dropdown, using default season")
-            except Exception as e:
-                print(f"Warning: Error selecting season '{self.season}': {e}")
-                print("Continuing with default season...")
+            print(f"Selecting season '{self.season}', category '{self.category}', team '{self.filter_team}'...")
+            await self._select_filter(iframe_page, '#dropdownMenuButton', 'a.dropdown-item.select_season', self.season)
+            await self._select_filter(iframe_page, '#dropdownMenuButtonCategories', 'a.dropdown-item.select_category', self.category)
+            await self._select_filter(iframe_page, '#dropdownMenuButtonTeam', 'a.dropdown-item.select_team', self.filter_team)
 
-            try:
-                list_view_button = await iframe_page.query_selector('label.list_view[data-view="list"]')
-                if list_view_button:
-                    print("Switching to full calendar view...")
-                    await list_view_button.click()
-                    await asyncio.sleep(5)
-                else:
-                    print("Warning: Could not find full calendar view button, using default view")
-            except Exception as e:
-                print(f"Warning: Error switching to full calendar view: {e}")
-                print("Continuing with default view...")
+            print("Switching to full calendar view...")
+            await iframe_page.locator('label.list_view[data-view="list"]').click()
+            await iframe_page.locator('.loading_overlay').wait_for(state='hidden')
+            await iframe_page.locator('table.schedule_table').wait_for(state='visible')
 
             content = await iframe_page.content()
             soup = BeautifulSoup(content, 'html.parser')
@@ -167,10 +170,7 @@ class DDLCGameFetcher:
             schedule_table = soup.find('table', class_='schedule_table')
 
             if not schedule_table:
-                print("Error: Could not find schedule table")
-                await iframe_page.close()
-                await browser.close()
-                return self.games
+                raise RuntimeError("Could not find schedule table")
 
             all_rows = schedule_table.find_all('tr')
             print(f"Processing {len(all_rows)} rows from schedule...\n")
@@ -222,6 +222,8 @@ class DDLCGameFetcher:
                     cat_span = cat_name_div.find('span')
                     if cat_span:
                         category_text = cat_span.get_text(strip=True)
+                        if self._normalize_team(category_text) != self._normalize_team(self.category):
+                            continue
                         category = category_text.split()[0] if category_text else "Hockey"
                 else:
                     print(f"  Warning: Could not find category for game between {team_names[0]} and {team_names[1]}")
